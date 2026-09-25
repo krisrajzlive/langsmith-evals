@@ -23,6 +23,7 @@ import datetime
 
 from dotenv import load_dotenv
 from langchain_core.tracers.context import collect_runs
+from langchain_core.tracers.langchain import wait_for_all_tracers
 from langsmith import Client
 from langsmith.schemas import Run
 
@@ -49,7 +50,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _score_and_log(client: Client, run: Run) -> None:
+def _score_and_log(client: Client, run: Run, session_id) -> None:
     for evaluator in EVALUATORS:
         result = evaluator.evaluate_run(run)
         client.create_feedback(
@@ -57,18 +58,31 @@ def _score_and_log(client: Client, run: Run) -> None:
             key=result.key,
             score=result.score,
             comment=result.comment,
+            session_id=session_id,
         )
         print(f"run {run.id}: {result.key}={result.score} ({result.comment or ''})")
 
 
+def _resolve_session_id(client: Client, run: Run):
+    session_id = getattr(run, "session_id", None)
+    if session_id:
+        return session_id
+    session_name = getattr(run, "session_name", None)
+    return client.read_project(project_name=session_name).id if session_name else None
+
+
 def get_live_runs(provider: str | None, model: str | None) -> list[Run]:
-    client = Client()
+    """Invoke the app and return its run trees directly (already populated with
+    outputs locally — no need to round-trip through the API, which lags behind
+    real time since ingestion is asynchronous)."""
     runs: list[Run] = []
     for question in LIVE_QUESTIONS:
         with collect_runs() as cb:
             answer_question(question, provider=provider, model=model)
-        root_run_id = cb.traced_runs[0].id
-        runs.append(client.read_run(root_run_id))
+        runs.append(cb.traced_runs[0])
+
+    # create_feedback() below needs the run to already exist server-side.
+    wait_for_all_tracers()
     return runs
 
 
@@ -100,7 +114,7 @@ def main() -> None:
         return
 
     for run in runs:
-        _score_and_log(client, run)
+        _score_and_log(client, run, _resolve_session_id(client, run))
 
 
 if __name__ == "__main__":
