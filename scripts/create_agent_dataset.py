@@ -48,6 +48,7 @@ EXAMPLES = [
 
 
 def main() -> None:
+    # Reuse the dataset if it already exists instead of erroring or duplicating it.
     client = Client()
 
     if client.has_dataset(dataset_name=DATASET_NAME):
@@ -60,6 +61,8 @@ def main() -> None:
         )
         print(f"Created dataset {DATASET_NAME!r} ({dataset.id}).")
 
+    # Only add examples that aren't already in the dataset, so re-running this
+    # script is safe (no duplicate rows) instead of appending EXAMPLES every time.
     existing = list(client.list_examples(dataset_id=dataset.id))
     existing_questions = {ex.inputs.get("question") for ex in existing}
     new_examples = [ex for ex in EXAMPLES if ex["question"] not in existing_questions]
@@ -68,6 +71,8 @@ def main() -> None:
         print("No new examples to add.")
         return
 
+    # inputs/outputs are parallel lists here: index i of each belongs to the same example.
+    # `expected_tools` rides along in outputs so tool_choice_correctness can check against it.
     client.create_examples(
         inputs=[{"question": ex["question"]} for ex in new_examples],
         outputs=[{"answer": ex["answer"], "expected_tools": ex["expected_tools"]} for ex in new_examples],

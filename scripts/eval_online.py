@@ -62,6 +62,8 @@ TARGET_CALLS = {
 
 
 def parse_args() -> argparse.Namespace:
+    # Exactly one of --live / --project is expected (enforced in main(), not
+    # here, since argparse can't express "one of these two" cleanly).
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--live", action="store_true", help="Invoke the app now and score those runs")
     parser.add_argument("--project", default=None, help="LangSmith project to pull recent runs from")
@@ -73,6 +75,8 @@ def parse_args() -> argparse.Namespace:
 
 
 def _score_and_log(client: Client, run: Run, session_id, evaluators) -> None:
+    # Runs each evaluator against this one run and immediately writes its score
+    # back to LangSmith as feedback attached to that run (visible in the UI).
     for evaluator in evaluators:
         result = evaluator.evaluate_run(run)
         client.create_feedback(
@@ -86,6 +90,9 @@ def _score_and_log(client: Client, run: Run, session_id, evaluators) -> None:
 
 
 def _resolve_session_id(client: Client, run: Run):
+    # "session_id" is LangSmith's internal name for a project's id. Runs fetched
+    # via list_runs() already carry it; runs captured locally off a live
+    # invocation don't, so fall back to looking it up by project name instead.
     session_id = getattr(run, "session_id", None)
     if session_id:
         return session_id
@@ -115,6 +122,10 @@ def get_live_runs(target: str, provider: str | None, model: str | None) -> list[
 
 
 def get_recent_project_runs(client: Client, project_name: str, minutes: int) -> list[Run]:
+    """Fetch real, already-logged runs from a LangSmith project instead of
+    generating traffic ourselves — the actual "monitor production" path.
+    `is_root=True` skips internal/child runs (tool calls, sub-steps) and
+    returns only the top-level invocation of each trace."""
     since = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=minutes)
     return list(
         client.list_runs(
@@ -130,6 +141,7 @@ def main() -> None:
     args = parse_args()
     client = Client()
 
+    # Get the list of runs to score, from whichever source was requested.
     if args.live:
         runs = get_live_runs(args.target, args.provider, args.model)
     elif args.project:
@@ -141,6 +153,7 @@ def main() -> None:
         print("No runs found to score.")
         return
 
+    # Same evaluators, applied to every run, regardless of where it came from.
     evaluators = EVALUATORS[args.target]
     for run in runs:
         _score_and_log(client, run, _resolve_session_id(client, run), evaluators)

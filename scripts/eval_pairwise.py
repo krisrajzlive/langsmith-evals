@@ -38,6 +38,8 @@ TARGET_CALLS = {
 
 
 def parse_args() -> argparse.Namespace:
+    # Variant A and variant B each get their own target/provider/model, so you
+    # can compare two providers on the same target, or two targets outright.
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", default=None, help="Defaults based on --a-target")
     parser.add_argument("--a-target", choices=list(TARGET_CALLS), default="chain")
@@ -48,17 +50,26 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--b-model", default=None)
     args = parser.parse_args()
     if args.dataset is None:
+        # Only variant A's target decides the default dataset. If A and B use
+        # different targets, pass --dataset explicitly to pick one that fits both.
         args.dataset = DATASET_BY_TARGET[args.a_target]
     return args
 
 
 def _target(inputs: dict, target: str, provider: str, model: str | None) -> dict:
+    # answer_question() returns a plain string; run_agent() already returns a
+    # dict. Normalize both to {"output": ...} so evaluate() sees one shape.
     result = TARGET_CALLS[target](inputs["question"], provider=provider, model=model)
     return result if isinstance(result, dict) else {"output": result}
 
 
 def preference(runs: list[Run], example: Example | None = None) -> ComparisonEvaluationResult:
-    """LLM judge picks the better of the two candidate answers (1.0 winner / 0.0 loser)."""
+    """LLM judge picks the better of the two candidate answers (1.0 winner / 0.0 loser).
+
+    Unlike the single-run evaluators in evaluators.py, a comparative evaluator
+    receives both runs (one per experiment, same dataset example) at once, so
+    it can judge them against each other rather than scoring each in isolation.
+    """
     question = example.inputs.get("question", "") if example else ""
     reference = (example.outputs or {}).get("answer", "") if example else ""
 
@@ -75,6 +86,7 @@ def preference(runs: list[Run], example: Example | None = None) -> ComparisonEva
             ("human", f"Question: {question}\nReference: {reference}\n\nCandidates:\n{candidates}"),
         ]
     )
+    # Naive parse: look for "0" in the reply, default to index 1 otherwise.
     winner_index = 0 if "0" in verdict.content else 1
     scores = {run.id: (1.0 if i == winner_index else 0.0) for i, run in enumerate(runs)}
     return ComparisonEvaluationResult(key="preference", scores=scores)
@@ -83,6 +95,7 @@ def preference(runs: list[Run], example: Example | None = None) -> ComparisonEva
 def main() -> None:
     args = parse_args()
 
+    # Run variant A and variant B as two separate, ordinary offline experiments first...
     experiment_a = evaluate(
         functools.partial(_target, target=args.a_target, provider=args.a_provider, model=args.a_model),
         data=args.dataset,
@@ -94,6 +107,7 @@ def main() -> None:
         experiment_prefix=f"pairwise-b-{args.b_target}-{args.b_provider}",
     )
 
+    # ...then compare their results example-by-example with the `preference` judge.
     results = evaluate_comparative(
         (experiment_a.experiment_name, experiment_b.experiment_name),
         evaluators=[preference],

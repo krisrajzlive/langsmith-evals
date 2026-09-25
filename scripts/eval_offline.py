@@ -25,6 +25,8 @@ DATASET_NAME = "qa-smoke-test"
 
 
 def parse_args() -> argparse.Namespace:
+    # --provider/--model select the chain's LLM; --dataset overrides which LangSmith
+    # dataset to evaluate against (defaults to the one create_dataset.py seeds).
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--provider", default=None, help="openai | ollama | huggingface")
     parser.add_argument("--model", default=None, help="Provider-specific model name")
@@ -36,8 +38,14 @@ def main() -> None:
     args = parse_args()
 
     def target(inputs: dict) -> dict:
-        return {"output": answer_question(inputs["question"], provider=args.provider, model=args.model)}
+        # `inputs` comes from LangSmith: one dataset row's `inputs` field per call.
+        # `args.provider`/`args.model` come from the CLI flags: fixed for the whole run.
+        question = inputs["question"]
+        answer = answer_question(question, provider=args.provider, model=args.model)
+        return {"output": answer}
 
+    # Runs `target` once per dataset example, scores each result with every
+    # evaluator, and logs everything as a named experiment in LangSmith.
     results = evaluate(
         target,
         data=args.dataset,
