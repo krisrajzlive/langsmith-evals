@@ -59,8 +59,7 @@ src/langsmith_evals/
   providers.py     # get_chat_model(provider, model) for openai/ollama/huggingface
   target_app.py     # target 1: bare prompt -> LLM chain
   agent.py          # target 2: LangChain create_agent with calculator tools
-  evaluators.py     # shared evaluators: correctness (LLM judge), conciseness,
-                     #   non_empty, used_tools, tool_choice_correctness
+  evaluators.py     # shared evaluators (see "Evaluators" below)
 scripts/
   create_dataset.py         # seed the QA dataset (for `chain`)
   create_agent_dataset.py   # seed the arithmetic dataset (for `agent`)
@@ -72,12 +71,68 @@ tests/
   test_evaluators.py   # unit tests for the non-LLM evaluators (no API calls)
 ```
 
-## Offline evaluation
+## Offline vs. online vs. pairwise evaluation
 
-Run a target app over a fixed dataset and score every example — the standard
-"batch eval" workflow, producing a scored experiment in LangSmith. The agent
-evaluators additionally check whether it called a tool at all (`used_tools`)
-and whether it called the *expected* tool(s) for that task (`tool_choice_correctness`).
+These three answer different questions, and use different evaluators because
+of it:
+
+- **Offline** ([eval_offline.py](scripts/eval_offline.py),
+  [eval_agent_offline.py](scripts/eval_agent_offline.py)) — runs the app
+  against a **fixed, curated dataset** with known-good reference answers.
+  Deliberately controlled: same questions every time, so you can compare
+  experiments apples-to-apples across code/prompt/model changes ("did this
+  change make things better or worse on the same N questions?"). Because
+  there's a reference answer, evaluators can compare *against* it
+  (`correctness`, `tool_choice_correctness`). Think: a regression test suite.
+
+- **Online** ([eval_online.py](scripts/eval_online.py)) — scores **real
+  traces** instead: either traffic you generate right now (`--live`) or
+  actual runs already logged to a LangSmith project (`--project`). No
+  dataset, no reference answers — you don't control what a user asks, so
+  there's nothing to compare against. Only reference-free evaluators apply
+  (`conciseness`, `non_empty`, `used_tools`, `tool_faithfulness`). Results
+  are attached back to the run as LangSmith *feedback*, not a new
+  experiment. Think: production monitoring/observability.
+
+- **Pairwise** ([eval_pairwise.py](scripts/eval_pairwise.py)) — runs **two
+  variants** (different providers, models, or targets) over the same
+  dataset, then has an LLM judge pick a winner example-by-example. Useful
+  for A/B decisions ("is `deep_agent` actually better than `agent`?", "is
+  `gpt-4o-mini` good enough vs. a bigger model?") where you want a head-to-head
+  comparison rather than two separate absolute scores.
+
+## Evaluators
+
+All defined in [evaluators.py](src/langsmith_evals/evaluators.py):
+
+| Evaluator | Used on | LLM call? | What it checks |
+|---|---|---|---|
+| `correctness` | any | yes (judge) | Final answer vs. the dataset's reference answer, scored 1-5 -> 0-1. |
+| `conciseness` | any | no | Penalizes answers over ~60 words. |
+| `non_empty` | any | no | Did the app produce any output at all. |
+| `used_tools` | agent only | no | Did it call a tool at all, instead of guessing by hand. |
+| `tool_choice_correctness` | agent only | no | Did it call the *expected* tool(s) for that task (dataset's `expected_tools`). |
+| `tool_faithfulness` | agent only | no | Does the final answer match what the **last tool call actually returned** — independent of whether that answer happens to be objectively right. |
+
+`tool_faithfulness` is the odd one out and worth calling out: it's the only
+evaluator here that can catch a broken tool *even when the model gets the
+right answer anyway*. We hit this for real during development — the `add`
+tool was deliberately broken (`return a + b + 5`), and `correctness` kept
+scoring 1.0 because the model quietly distrusted the wrong tool output and
+answered from its own (correct) mental math instead. `tool_faithfulness`
+compares the final answer against the tool's actual return value, not the
+"real" answer, so it caught it where every other evaluator passed. See
+[agent.py](src/langsmith_evals/agent.py) — `run_agent()` returns both
+`tool_calls` (names) and `tool_results` (actual returned values) so this
+evaluator has something to check against.
+
+**Tracing a low score back to the actual tool call:** open the failing row
+in the LangSmith experiment link the script prints, click into it, and the
+run's trace tree (`LangGraph -> model -> tools -> <tool name>`) shows each
+tool span's real `inputs`/`outputs`. That's the fastest way to see *why* an
+evaluator flagged something, not just that it did.
+
+## Offline evaluation
 
 ```bash
 uv run python scripts/create_dataset.py           # once, seeds qa-smoke-test (chain)
@@ -90,13 +145,6 @@ uv run python scripts/eval_agent_offline.py
 
 ## Online evaluation
 
-Score real traces after the fact instead of a fixed dataset — either traffic
-you generate right now (`--live`) or recent runs already logged to a
-LangSmith project (`--project`). `--target` picks which app's traces to score
-(`chain` default, or `agent`). Reference-free evaluators only (no dataset
-example to compare against); results are attached back to each run as
-LangSmith feedback.
-
 ```bash
 uv run python scripts/eval_online.py --live
 uv run python scripts/eval_online.py --live --target agent
@@ -105,9 +153,14 @@ uv run python scripts/eval_online.py --project my-prod-project --minutes 60
 
 ## Pairwise (comparative) evaluation
 
-Run two variants over the same dataset, then have an LLM judge pick a winner
-example-by-example. Vary provider/model for a given target, or compare the
-chain against the agent directly on the same tasks:
+Vary provider/model for a given target, or compare the chain against the
+agent directly on the same tasks. Every dataset-`evaluate()` call under the
+hood makes its own LLM calls — with two variants plus the judge, that's
+**3 separate LLM calls per example**, not 1: variant A's answer, variant B's
+answer, and the judge's verdict. The judge itself (`preference()` in
+[eval_pairwise.py](scripts/eval_pairwise.py)) always uses `.env`'s default
+provider/model — it's not wired to `--a-*`/`--b-*`, so it stays a neutral
+third party regardless of what you're comparing.
 
 ```bash
 uv run python scripts/eval_pairwise.py --a-provider openai --b-provider ollama --b-model llama3.1
@@ -126,3 +179,7 @@ uv run pytest
   output the `correctness` judge relies on. `huggingface` models vary — if the
   judge step fails on a HF model, point `PROVIDER`/judge calls at `openai` or
   `ollama` while keeping the target app on `huggingface`.
+- `ollama` requires a local Ollama server actually running (`ollama serve`,
+  or the desktop app) and reachable at `OLLAMA_BASE_URL`
+  (`http://localhost:11434` by default) — a connection-refused error here
+  means nothing is listening on that port, not a LangSmith/API quota issue.

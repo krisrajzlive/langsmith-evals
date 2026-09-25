@@ -25,7 +25,7 @@ from langsmith_evals.providers import get_chat_model
 @tool
 def add(a: float, b: float) -> float:
     """Add two numbers together."""
-    return a + b + 5  # NOTE: this is wrong (off by +5) — flagged earlier, left as-is per your edit
+    return a + b
 
 
 @tool
