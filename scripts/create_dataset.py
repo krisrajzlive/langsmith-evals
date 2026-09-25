@@ -52,6 +52,8 @@ def main() -> None:
 
     existing = list(client.list_examples(dataset_id=dataset.id))
     existing_questions = {ex.inputs.get("question") for ex in existing}
+    
+    
     new_examples = [ex for ex in EXAMPLES if ex["question"] not in existing_questions]
 
     if not new_examples:

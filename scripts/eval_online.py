@@ -8,11 +8,17 @@ Two ways to feed it runs:
   2. --project + --minutes: pull the most recent runs already logged to a
      LangSmith project (real production traffic) and score those instead.
 
+--target picks what's under evaluation: the bare prompt->LLM chain (`chain`,
+default) or the tool-calling agent (`agent`) — the agent is the more
+realistic choice for "online" monitoring, since production traffic is
+usually an agent.
+
 Because there's no golden reference for live traffic, only reference-free
 evaluators are used here (no `correctness`, which needs a dataset example).
 
 Usage:
     uv run python scripts/eval_online.py --live
+    uv run python scripts/eval_online.py --live --target agent
     uv run python scripts/eval_online.py --project my-prod-project --minutes 60
 """
 
@@ -27,17 +33,32 @@ from langchain_core.tracers.langchain import wait_for_all_tracers
 from langsmith import Client
 from langsmith.schemas import Run
 
-from langsmith_evals.evaluators import conciseness, non_empty
+from langsmith_evals.agent import run_agent
+from langsmith_evals.evaluators import conciseness, non_empty, used_tools
 from langsmith_evals.target_app import answer_question
 
 load_dotenv()
 
-LIVE_QUESTIONS = [
-    "What's a quick way to explain recursion to a beginner?",
-    "Give me one tip for writing better commit messages.",
-]
+LIVE_QUESTIONS = {
+    "chain": [
+        "What's a quick way to explain recursion to a beginner?",
+        "Give me one tip for writing better commit messages.",
+    ],
+    "agent": [
+        "What is 12 plus 8?",
+        "What is (7 times 9) divided by 3?",
+    ],
+}
 
-EVALUATORS = [conciseness, non_empty]
+EVALUATORS = {
+    "chain": [conciseness, non_empty],
+    "agent": [conciseness, non_empty, used_tools],
+}
+
+TARGET_CALLS = {
+    "chain": answer_question,
+    "agent": run_agent,
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -45,13 +66,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--live", action="store_true", help="Invoke the app now and score those runs")
     parser.add_argument("--project", default=None, help="LangSmith project to pull recent runs from")
     parser.add_argument("--minutes", type=int, default=60, help="Look back window when using --project")
+    parser.add_argument("--target", choices=["chain", "agent"], default="chain")
     parser.add_argument("--provider", default=None)
     parser.add_argument("--model", default=None)
     return parser.parse_args()
 
 
-def _score_and_log(client: Client, run: Run, session_id) -> None:
-    for evaluator in EVALUATORS:
+def _score_and_log(client: Client, run: Run, session_id, evaluators) -> None:
+    for evaluator in evaluators:
         result = evaluator.evaluate_run(run)
         client.create_feedback(
             run_id=run.id,
@@ -71,15 +93,21 @@ def _resolve_session_id(client: Client, run: Run):
     return client.read_project(project_name=session_name).id if session_name else None
 
 
-def get_live_runs(provider: str | None, model: str | None) -> list[Run]:
+def get_live_runs(target: str, provider: str | None, model: str | None) -> list[Run]:
     """Invoke the app and return its run trees directly (already populated with
     outputs locally — no need to round-trip through the API, which lags behind
     real time since ingestion is asynchronous)."""
+    target_fn = TARGET_CALLS[target]
+
     runs: list[Run] = []
-    for question in LIVE_QUESTIONS:
+    for question in LIVE_QUESTIONS[target]:
         with collect_runs() as cb:
-            answer_question(question, provider=provider, model=model)
-        runs.append(cb.traced_runs[0])
+            target_fn(question, provider=provider, model=model)
+        # collect_runs() gathers every top-level run started in the context, in
+        # completion order. For an agent that's its internal LLM/tool calls
+        # *and* the outer graph run; the graph run finishes last, so [-1]
+        # is the one whose outputs are the full {"messages": [...]} state.
+        runs.append(cb.traced_runs[-1])
 
     # create_feedback() below needs the run to already exist server-side.
     wait_for_all_tracers()
@@ -103,7 +131,7 @@ def main() -> None:
     client = Client()
 
     if args.live:
-        runs = get_live_runs(args.provider, args.model)
+        runs = get_live_runs(args.target, args.provider, args.model)
     elif args.project:
         runs = get_recent_project_runs(client, args.project, args.minutes)
     else:
@@ -113,8 +141,9 @@ def main() -> None:
         print("No runs found to score.")
         return
 
+    evaluators = EVALUATORS[args.target]
     for run in runs:
-        _score_and_log(client, run, _resolve_session_id(client, run))
+        _score_and_log(client, run, _resolve_session_id(client, run), evaluators)
 
 
 if __name__ == "__main__":

@@ -24,18 +24,48 @@ Score the candidate answer's correctness and completeness relative to the refere
 5 = fully correct and complete, 1 = wrong or irrelevant."""
 
 
-def _extract_output_text(run: Run) -> str:
-    """Pull the answer text out of a run's outputs, whatever shape they're in.
+def output_text_from(outputs: dict) -> str:
+    """Pull the final answer text out of an outputs dict, whatever shape it's in.
 
-    `evaluate()`-driven runs have outputs like `{"output": "some string"}`
-    (the target function's own return value). Runs captured straight off a
-    LangChain `Runnable` (e.g. in the online eval script) instead carry the
-    last step's raw return value, e.g. `{"output": AIMessage(...)}`.
+    Three shapes show up across the scripts/apps here:
+    - `evaluate()`-driven runs over `target_app.answer_question` / `agent.run_agent`
+      / `deep_agent.run_deep_agent`: `{"output": "some string"}` (the target
+      function's own return value).
+    - a bare LangChain `Runnable` traced directly (e.g. online eval on `target_app`):
+      `{"output": AIMessage(...)}`.
+    - a LangGraph/deepagents agent traced directly (e.g. online eval on `agent`):
+      `{"messages": [HumanMessage(...), AIMessage(...), ToolMessage(...), ...], ...}`.
     """
-    value = (run.outputs or {}).get("output", "")
+    outputs = outputs or {}
+
+    if "messages" in outputs:
+        for message in reversed(outputs["messages"]):
+            if type(message).__name__ == "AIMessage" and getattr(message, "content", ""):
+                return message.content
+        return ""
+
+    value = outputs.get("output", "")
     if hasattr(value, "content"):
         return value.content
     return value if isinstance(value, str) else str(value)
+
+
+def tool_calls_from(outputs: dict) -> list[str]:
+    """Names of tools invoked, across the same output shapes as `output_text_from`."""
+    outputs = outputs or {}
+
+    if "messages" in outputs:
+        return [m.name for m in outputs["messages"] if type(m).__name__ == "ToolMessage"]
+
+    return outputs.get("tool_calls", [])
+
+
+def _extract_output_text(run: Run) -> str:
+    return output_text_from(run.outputs)
+
+
+def _extract_tool_calls(run: Run) -> list[str]:
+    return tool_calls_from(run.outputs)
 
 
 def _judge(question: str, reference: str, candidate: str) -> Judgement:
@@ -76,3 +106,30 @@ def non_empty(run: Run, example: Example | None = None) -> EvaluationResult:
     """Heuristic: did the app produce any output at all."""
     candidate = _extract_output_text(run)
     return EvaluationResult(key="non_empty", score=1.0 if candidate.strip() else 0.0)
+
+
+@run_evaluator
+def used_tools(run: Run, example: Example | None = None) -> EvaluationResult:
+    """Heuristic (agent only): did it actually call a tool instead of guessing by hand."""
+    tool_calls = _extract_tool_calls(run)
+    return EvaluationResult(key="used_tools", score=1.0 if tool_calls else 0.0, comment=", ".join(tool_calls) or None)
+
+
+@run_evaluator
+def tool_choice_correctness(run: Run, example: Example | None = None) -> EvaluationResult:
+    """Heuristic (agent only): did the set of tools called match the dataset's `expected_tools`.
+
+    Scored as overlap (expected tools that were actually called / expected tools),
+    so an agent that also retries a tool after a bad call isn't unfairly penalized.
+    """
+    expected = set((example.outputs or {}).get("expected_tools", [])) if example else set()
+    if not expected:
+        return EvaluationResult(key="tool_choice_correctness", score=None, comment="no expected_tools on example")
+
+    actual = set(_extract_tool_calls(run))
+    score = len(expected & actual) / len(expected)
+    return EvaluationResult(
+        key="tool_choice_correctness",
+        score=score,
+        comment=f"expected {sorted(expected)}, got {sorted(actual)}",
+    )

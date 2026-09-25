@@ -19,53 +19,79 @@ Fill in `.env`:
 - `OPENAI_API_KEY` / `HUGGINGFACEHUB_API_TOKEN` — as needed for your provider.
 - `OLLAMA_BASE_URL` — only if your Ollama server isn't `http://localhost:11434`.
 
+## Apps under test
+
+Two targets, both plain LangChain, evaluated the same way:
+
+- **`chain`** ([target_app.py](src/langsmith_evals/target_app.py)) — a bare
+  `ChatPromptTemplate | chat_model` Runnable. No tools, single LLM call.
+- **`agent`** ([agent.py](src/langsmith_evals/agent.py)) — a tool-calling
+  agent built with LangChain's own `create_agent` (`langchain.agents`, no
+  extra framework) and calculator tools (`add`/`multiply`/`divide`) built
+  with LangChain's `@tool` decorator. Exercises the actual agent loop: tool
+  selection, tool execution, and (sometimes) self-correction after a bad
+  tool call.
+
 ## Project layout
 
 ```
 src/langsmith_evals/
   providers.py     # get_chat_model(provider, model) for openai/ollama/huggingface
-  target_app.py     # the app under test — a minimal QA chain
-  evaluators.py     # shared evaluators: correctness (LLM judge), conciseness, non_empty
+  target_app.py     # target 1: bare prompt -> LLM chain
+  agent.py          # target 2: LangChain create_agent with calculator tools
+  evaluators.py     # shared evaluators: correctness (LLM judge), conciseness,
+                     #   non_empty, used_tools, tool_choice_correctness
 scripts/
-  create_dataset.py   # seed a LangSmith dataset with QA examples
-  eval_offline.py      # batch eval over a fixed dataset (offline)
-  eval_online.py       # score live/production traces after the fact (online)
-  eval_pairwise.py     # compare two providers/models head-to-head
+  create_dataset.py         # seed the QA dataset (for `chain`)
+  create_agent_dataset.py   # seed the arithmetic dataset (for `agent`)
+  eval_offline.py           # batch eval of `chain` over its dataset
+  eval_agent_offline.py     # batch eval of `agent` over the arithmetic dataset
+  eval_online.py            # score live/production traces (--target chain|agent)
+  eval_pairwise.py          # compare two variants (providers, models, or targets) head-to-head
 tests/
   test_evaluators.py   # unit tests for the non-LLM evaluators (no API calls)
 ```
 
 ## Offline evaluation
 
-Run the target app over a fixed dataset and score every example — the
-standard "batch eval" workflow, producing a scored experiment in LangSmith.
+Run a target app over a fixed dataset and score every example — the standard
+"batch eval" workflow, producing a scored experiment in LangSmith. The agent
+evaluators additionally check whether it called a tool at all (`used_tools`)
+and whether it called the *expected* tool(s) for that task (`tool_choice_correctness`).
 
 ```bash
-uv run python scripts/create_dataset.py     # once, to seed the dataset
+uv run python scripts/create_dataset.py           # once, seeds qa-smoke-test (chain)
+uv run python scripts/create_agent_dataset.py      # once, seeds agent-math-tasks (agent)
+
 uv run python scripts/eval_offline.py
 uv run python scripts/eval_offline.py --provider ollama --model llama3.1
+uv run python scripts/eval_agent_offline.py
 ```
 
 ## Online evaluation
 
 Score real traces after the fact instead of a fixed dataset — either traffic
 you generate right now (`--live`) or recent runs already logged to a
-LangSmith project (`--project`). Reference-free evaluators only (no dataset
+LangSmith project (`--project`). `--target` picks which app's traces to score
+(`chain` default, or `agent`). Reference-free evaluators only (no dataset
 example to compare against); results are attached back to each run as
 LangSmith feedback.
 
 ```bash
 uv run python scripts/eval_online.py --live
+uv run python scripts/eval_online.py --live --target agent
 uv run python scripts/eval_online.py --project my-prod-project --minutes 60
 ```
 
 ## Pairwise (comparative) evaluation
 
-Run two variants (e.g. different providers/models/prompts) over the same
-dataset, then have an LLM judge pick a winner example-by-example.
+Run two variants over the same dataset, then have an LLM judge pick a winner
+example-by-example. Vary provider/model for a given target, or compare the
+chain against the agent directly on the same tasks:
 
 ```bash
 uv run python scripts/eval_pairwise.py --a-provider openai --b-provider ollama --b-model llama3.1
+uv run python scripts/eval_pairwise.py --a-target agent --a-provider openai --b-target agent --b-provider ollama --b-model llama3.1
 ```
 
 ## Tests
