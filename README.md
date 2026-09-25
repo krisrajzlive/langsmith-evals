@@ -19,6 +19,26 @@ Fill in `.env`:
 - `OPENAI_API_KEY` / `HUGGINGFACEHUB_API_TOKEN` — as needed for your provider.
 - `OLLAMA_BASE_URL` — only if your Ollama server isn't `http://localhost:11434`.
 
+## Running the scripts
+
+1. One-time setup: `uv sync`, then `cp .env.example .env` and fill in keys (see below).
+2. Seed datasets (once each — safe to re-run, they skip examples that already exist):
+   ```bash
+   uv run python scripts/create_dataset.py         # qa-smoke-test, for `chain`
+   uv run python scripts/create_agent_dataset.py   # agent-math-tasks, for `agent`
+   ```
+3. Then run whichever of these you need, in any order:
+
+   | Script | Needs a dataset first? | What it does |
+   |---|---|---|
+   | `eval_offline.py` | yes (`qa-smoke-test`) | batch-scores the plain chain |
+   | `eval_agent_offline.py` | yes (`agent-math-tasks`) | batch-scores the agent, including tool usage |
+   | `eval_online.py --live` | no | scores traces generated right now |
+   | `eval_online.py --project <name>` | no | scores traces already logged to a LangSmith project |
+   | `eval_pairwise.py` | yes (matches `--a-target`) | A/B two variants (providers/models/targets) |
+
+   The only hard rule is dataset-before-offline/pairwise on that dataset; `eval_online.py` needs no dataset at all.
+
 ## Apps under test
 
 Two targets, both plain LangChain, evaluated the same way:
