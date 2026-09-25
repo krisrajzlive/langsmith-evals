@@ -19,10 +19,13 @@ _PROMPT = ChatPromptTemplate.from_messages(
 
 
 def build_chain(provider: str | None = None, model: str | None = None):
+    # `|` is LangChain's Runnable composition: pipes the formatted prompt into the model.
     llm = get_chat_model(provider=provider, model=model)
     return _PROMPT | llm
 
 
 def answer_question(question: str, provider: str | None = None, model: str | None = None) -> str:
+    # A fresh chain per call (not cached) — simple, and cheap relative to the LLM call itself.
     chain = build_chain(provider=provider, model=model)
+    # `.content` unwraps the AIMessage LangChain returns down to the plain answer text.
     return chain.invoke({"question": question}).content

@@ -19,10 +19,13 @@ def get_chat_model(provider: str | None = None, model: str | None = None, temper
     provider: "openai" | "ollama" | "huggingface". Defaults to $PROVIDER (or "openai").
     model: provider-specific model name. Defaults to DEFAULT_MODELS[provider].
     """
+    # Explicit args win; otherwise fall back to .env (PROVIDER / OPENAI_MODEL etc.),
+    # then to the hardcoded default for that provider.
     provider = (provider or os.environ.get("PROVIDER", "openai")).lower()
     model = model or os.environ.get(f"{provider.upper()}_MODEL") or DEFAULT_MODELS[provider]
 
     if provider == "openai":
+        # Imported lazily so installing/using one provider doesn't require the others' SDKs.
         from langchain_openai import ChatOpenAI
 
         return ChatOpenAI(model=model, temperature=temperature, api_key=os.environ.get("OPENAI_API_KEY"))
@@ -39,6 +42,7 @@ def get_chat_model(provider: str | None = None, model: str | None = None, temper
     if provider == "huggingface":
         from langchain_huggingface import ChatHuggingFace, HuggingFaceEndpoint
 
+        # HF's endpoint rejects temperature=0.0, so nudge it up to the smallest usable value.
         llm = HuggingFaceEndpoint(
             repo_id=model,
             temperature=temperature or 0.01,

@@ -17,10 +17,15 @@ from langchain_core.tools import tool
 from langsmith_evals.providers import get_chat_model
 
 
+# @tool's docstring isn't just documentation here — LangChain sends it to the
+# model as the tool's description, so it's what the LLM reads to decide when
+# to call this tool. Keep it accurate; a misleading docstring misleads the model too.
+
+
 @tool
 def add(a: float, b: float) -> float:
     """Add two numbers together."""
-    return a + b
+    return a + b + 5  # NOTE: this is wrong (off by +5) — flagged earlier, left as-is per your edit
 
 
 @tool
@@ -44,6 +49,9 @@ _SYSTEM_PROMPT = (
 
 
 def build_agent(provider: str | None = None, model: str | None = None):
+    # create_agent() compiles a graph that loops: call the model -> if it
+    # requested tool calls, run them -> feed results back to the model -> repeat
+    # until it answers without calling a tool.
     llm = get_chat_model(provider=provider, model=model)
     return create_agent(llm, tools=TOOLS, system_prompt=_SYSTEM_PROMPT)
 
@@ -55,10 +63,17 @@ def run_agent(question: str, provider: str | None = None, model: str | None = No
     target function in `evaluate()`, so keep it evaluator-friendly.
     """
     agent = build_agent(provider=provider, model=model)
+    # create_agent's state shape: {"messages": [HumanMessage, AIMessage, ToolMessage, ...]}
+    # — the full conversation, including every intermediate tool call and result.
     result = agent.invoke({"messages": [("human", question)]})
 
     messages = result["messages"]
+    # Walk backwards to find the last AI message with content — that's the final
+    # answer, as opposed to an earlier AIMessage that only requested a tool call
+    # (those have empty .content).
     final_answer = next(m.content for m in reversed(messages) if isinstance(m, AIMessage) and m.content)
+    # Every ToolMessage in the transcript is one tool call's result; its .name
+    # is which tool produced it, so this recovers the full call sequence.
     tool_calls = [m.name for m in messages if isinstance(m, ToolMessage)]
 
     return {"output": final_answer, "tool_calls": tool_calls}

@@ -8,6 +8,8 @@ from langsmith_evals.evaluators import conciseness, non_empty
 
 
 def _make_run(output_text: str) -> Run:
+    # Minimal fake Run in the {"output": "..."} shape (matches an evaluate()-driven
+    # run over target_app.answer_question), just enough for Run's required fields.
     return Run(
         id="00000000-0000-0000-0000-000000000000",
         name="test-run",
