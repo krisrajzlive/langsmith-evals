@@ -75,5 +75,9 @@ def run_agent(question: str, provider: str | None = None, model: str | None = No
     # Every ToolMessage in the transcript is one tool call's result; its .name
     # is which tool produced it, so this recovers the full call sequence.
     tool_calls = [m.name for m in messages if isinstance(m, ToolMessage)]
+    # ...and its .content is what that tool actually returned — kept separately
+    # so evaluators can check the final answer against the *real* tool output,
+    # not just "was some tool called."
+    tool_results = [m.content for m in messages if isinstance(m, ToolMessage)]
 
-    return {"output": final_answer, "tool_calls": tool_calls}
+    return {"output": final_answer, "tool_calls": tool_calls, "tool_results": tool_results}

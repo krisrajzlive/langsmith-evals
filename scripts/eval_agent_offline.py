@@ -18,7 +18,7 @@ from dotenv import load_dotenv
 from langsmith.evaluation import evaluate
 
 from langsmith_evals.agent import run_agent
-from langsmith_evals.evaluators import correctness, tool_choice_correctness, used_tools
+from langsmith_evals.evaluators import correctness, tool_choice_correctness, tool_faithfulness, used_tools
 
 load_dotenv()
 
@@ -48,7 +48,7 @@ def main() -> None:
     results = evaluate(
         target,
         data=args.dataset,
-        evaluators=[correctness, used_tools, tool_choice_correctness],
+        evaluators=[correctness, used_tools, tool_choice_correctness, tool_faithfulness],
         experiment_prefix=f"agent-offline-{args.provider or 'default'}",
         metadata={"provider": args.provider, "model": args.model, "target": "agent"},
     )

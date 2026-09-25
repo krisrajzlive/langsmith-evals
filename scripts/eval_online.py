@@ -34,7 +34,7 @@ from langsmith import Client
 from langsmith.schemas import Run
 
 from langsmith_evals.agent import run_agent
-from langsmith_evals.evaluators import conciseness, non_empty, used_tools
+from langsmith_evals.evaluators import conciseness, non_empty, tool_faithfulness, used_tools
 from langsmith_evals.target_app import answer_question
 
 load_dotenv()
@@ -52,7 +52,7 @@ LIVE_QUESTIONS = {
 
 EVALUATORS = {
     "chain": [conciseness, non_empty],
-    "agent": [conciseness, non_empty, used_tools],
+    "agent": [conciseness, non_empty, used_tools, tool_faithfulness],
 }
 
 TARGET_CALLS = {

@@ -62,6 +62,18 @@ def tool_calls_from(outputs: dict) -> list[str]:
     return outputs.get("tool_calls", [])
 
 
+def tool_results_from(outputs: dict) -> list[str]:
+    """Raw content each tool call actually returned, same order as `tool_calls_from`,
+    across the same output shapes as `output_text_from`. Lets an evaluator check the
+    final answer against what a tool *really* returned, not just that one was called."""
+    outputs = outputs or {}
+
+    if "messages" in outputs:
+        return [m.content for m in outputs["messages"] if type(m).__name__ == "ToolMessage"]
+
+    return outputs.get("tool_results", [])
+
+
 # Thin Run-shaped wrappers so the evaluators below (which get a `Run`, per the
 # run_evaluator contract) can share the same dict-based extraction logic above.
 def _extract_output_text(run: Run) -> str:
@@ -146,4 +158,39 @@ def tool_choice_correctness(run: Run, example: Example | None = None) -> Evaluat
         key="tool_choice_correctness",
         score=score,
         comment=f"expected {sorted(expected)}, got {sorted(actual)}",
+    )
+
+
+@run_evaluator
+def tool_faithfulness(run: Run, example: Example | None = None) -> EvaluationResult:
+    """Heuristic (agent only): does the final answer actually reflect what the
+    *last* tool call returned, rather than the model silently overriding a bad
+    (or good) tool result with its own mental math.
+
+    This is the one evaluator here that can catch a broken tool even when the
+    model "gets lucky" and answers correctly anyway — `correctness` alone
+    can't: it only checks the final answer against the reference, and has no
+    idea whether the agent actually relied on its tools to get there.
+    """
+    tool_results = tool_results_from(run.outputs)
+    if not tool_results:
+        return EvaluationResult(key="tool_faithfulness", score=None, comment="no tool calls to check")
+
+    last_result = tool_results[-1]
+    try:
+        value = float(last_result)
+    except (TypeError, ValueError):
+        return EvaluationResult(key="tool_faithfulness", score=None, comment=f"tool result not numeric: {last_result!r}")
+
+    candidate = _extract_output_text(run)
+    # Accept either "25.0" or "25" showing up in the answer text — models
+    # normally drop the trailing ".0" for a whole number.
+    as_float_str = str(value)
+    as_int_str = str(int(value)) if value == int(value) else None
+    is_faithful = as_float_str in candidate or (as_int_str is not None and as_int_str in candidate)
+
+    return EvaluationResult(
+        key="tool_faithfulness",
+        score=1.0 if is_faithful else 0.0,
+        comment=f"last tool call returned {value}, final answer was {candidate!r}",
     )
